@@ -1,29 +1,18 @@
 #!/bin/sh
 set -e
 
-. ${UTILSDIR:=../cbutils/src}/umoci.lib.sh
-. ${UTILSDIR:=../cbutils/src}/runc.lib.sh
+ctr=$(buildah from ubuntu)
 
-u_set_loglevel $U_LOG_INFO
-u_set_autoclean
+buildah run $ctr sh -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install php-fpm'
 
-# create image
-img=$(u_clone_image "ubuntu")
-work=$(u_clone_ref "$img" latest)
-u_remove_refs_except "$img" "$work"
-
-layer=$(u_open_layer "$work")
-
-u_run "$layer" -- sh -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install php-fpm'
-
-php_ver=$(u_run "$layer" -- php -v 2>&1 head -n 1 | cut -f 2 -d ' ')
+php_ver=$(buildah run $ctr php -v 2>&1 head -n 1 | cut -f 2 -d ' ')
 # strip suffix
 php_ver="${php_ver%-*}"
 # gets version in x.y form
 php_ver_s="${php_ver%.${php_ver#*.*.}}"
 
-u_log_eval "$(cat <<E_LOG_EXEC
-cat > $(u_layer_path "$layer" "/etc/php/${php_ver_s}/fpm/php-fpm.conf") <<-EOF
+buildah run $ctr sh -c "$(cat <<E_LOG_EXEC
+cat > /etc/php/${php_ver_s}/fpm/php-fpm.conf <<-EOF
 	[global]
 	error_log = /proc/self/fd/2
 
@@ -45,27 +34,22 @@ EOF
 E_LOG_EXEC
 )"
 
-u_close_layer "$layer" "$work" --mask-path /var/lib/apt/lists/
+buildah run $ctr sh -c "[ -d /var/lib/apt/lists ] && rm -rf /var/lib/apt/lists/*"
 
-u_config "$work" --clear config.cmd --config.entrypoint /usr/bin/php
+buildah config --cmd "" --entrypoint '["/usr/bin/php"]' $ctr
 
-u_write_ref "$work" "$php_ver"
-u_write_ref "$work" "$php_ver_s"
-u_write_ref "$work" 7
-u_write_ref "$work" latest
+img=$(buildah commit $ctr php)
+buildah tag $img php:"$php_ver"
+buildah tag $img php:"$php_ver_s"
+buildah tag $img php:7
 
 # fpm
-u_config "$work" \
-	--config.entrypoint "/usr/sbin/php-fpm${php_ver_s}" --config.entrypoint --nodaemonize \
-	--config.exposedports 9000
-u_write_ref "$work" "fpm-$php_ver"
-u_write_ref "$work" "fpm-$php_ver_s"
-u_write_ref "$work" fpm-7
-u_write_ref "$work" fpm
+buildah config \
+	--entrypoint "[\"/usr/sbin/php-fpm${php_ver_s}\", \"--nodaemonize\"]" \
+	--port 9000 \
+	$ctr
 
-u_remove_ref "$work"
-
-# save iamge
-img=$(u_set_image_name "$img" "php")
-u_clean_image "$img"
-u_serialize_image "$img" "php-${php_ver}" > /dev/null
+img=$(buildah commit --rm $ctr php:fpm)
+buildah tag $img php:"fpm-$php_ver"
+buildah tag $img php:"fpm-$php_ver_s"
+buildah tag $img php:fpm-7
